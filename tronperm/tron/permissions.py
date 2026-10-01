@@ -5,13 +5,13 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tronpy.keys import to_base58check_address
 
-from tronperm.keys.validate import is_valid_tron_address, validate_tron_address
+from tronperm.keys.validate import validate_tron_address
 from tronperm.tron.operations import (
     DEFAULT_ACTIVE_OPERATIONS_HEX,
-    can_modify_permissions,
     can_transfer_trc20,
     can_transfer_trx,
     decode_operations,
+    has_account_permission_update_bit,
     normalize_operations_hex,
 )
 
@@ -139,10 +139,19 @@ class Permission(BaseModel):
 
     @property
     def can_modify_permissions(self) -> bool:
-        """Разрешено ли изменение прав аккаунта."""
+        """Можно ли этим permission сменить права аккаунта.
+
+        В TRON AccountPermissionUpdateContract подписывается Owner (id = 0).
+        Наличие бита в Active operations этого не даёт.
+        """
+        return self.type == PermissionType.OWNER
+
+    @property
+    def has_account_permission_update_bit(self) -> bool:
+        """Есть ли бит AccountPermissionUpdateContract в operations (только факт маски)."""
         if self.type == PermissionType.OWNER:
             return True
-        return bool(self.operations and can_modify_permissions(self.operations))
+        return bool(self.operations and has_account_permission_update_bit(self.operations))
 
     def to_dict(self) -> Dict[str, Any]:
         """Преобразует в формат словаря для TronPy и TRON API."""

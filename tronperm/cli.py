@@ -25,6 +25,7 @@ from tronperm.services import (
     TransferPlan,
     add_key_to_permissions,
     check_account_access,
+    collect_known_signer_addresses,
     execute_permission_update,
     execute_transfer,
     inspect_account,
@@ -32,7 +33,6 @@ from tronperm.services import (
     simulate_permission_update,
     simulate_transfer,
 )
-from tronperm.tron.account import PERMISSION_UPDATE_FEE_TRX
 from tronperm.tron.client import get_tron_client
 from tronperm.tron.permissions import AccountPermissions, PermissionType
 from tronperm.tron.tokens import DEFAULT_FEE_LIMIT_SUN
@@ -61,6 +61,25 @@ def print_network_banner() -> None:
         )
     else:
         console.print(f"[bold cyan]Сеть:[/bold cyan] {net} TESTNET")
+
+
+def prompt_broadcast_confirmation() -> bool:
+    """Повторно показывает сеть и требует явное confirm перед broadcast."""
+    print_network_banner()
+    if config.is_mainnet:
+        console.print("[bold]Для подтверждения отправки в MAINNET введите '[white]MAINNET[/white]':[/bold]")
+        user_input = typer.prompt("Подтверждение").strip()
+        if user_input != "MAINNET":
+            console.print("[yellow]Операция отменена пользователем.[/yellow]")
+            return False
+        return True
+
+    console.print("[bold]Для подтверждения отправки транзакции введите '[white]confirm[/white]':[/bold]")
+    user_input = typer.prompt("Подтверждение").strip()
+    if user_input != "confirm":
+        console.print("[yellow]Операция отменена пользователем.[/yellow]")
+        return False
+    return True
 
 
 def collect_signing_private_keys(key_files: Optional[List[Path]]) -> List[str]:
@@ -164,7 +183,8 @@ def render_account_permissions(report: AccountInspectionReport) -> None:
         console.print(
             f"  [bold]Переводы TRX:[/bold] {'[green]YES[/green]' if act.can_transfer_trx else '[red]NO[/red]'}  |  "
             f"[bold]TRC-20 / Смарт-контракты:[/bold] {'[green]YES[/green]' if act.can_transfer_trc20 else '[red]NO[/red]'}  |  "
-            f"[bold]Смена прав:[/bold] {'[yellow]YES[/yellow]' if act.can_modify_permissions else '[dim]NO[/dim]'}"
+            f"[bold]AccountPermissionUpdateContract bit:[/bold] "
+            f"{'[yellow]enabled[/yellow]' if act.has_account_permission_update_bit else '[dim]disabled[/dim]'}"
         )
         console.print()
 
@@ -180,11 +200,13 @@ def render_access_report(report: AccountAccessReport) -> None:
     # Owner доступ
     o = report.owner
     o_status = "[bold green]YES[/bold green]" if o.has_access else "[bold red]NO[/bold red]"
+    o_edit = "[bold green]YES[/bold green]" if o.can_modify_permissions else "[bold red]NO[/bold red]"
     console.print(
         Panel(
             f"[bold]Порог (Threshold):[/bold] {o.threshold}\n"
             f"[bold]Доступный вес:[/bold]     {o.available_weight}\n"
-            f"[bold]Доступ к Owner:[/bold]    {o_status}",
+            f"[bold]Доступ к Owner:[/bold]    {o_status}\n"
+            f"[bold]Permission update:[/bold] {o_edit}",
             title=f"OWNER (#{o.permission_id})",
             border_style="green" if o.has_access else "red",
         )
@@ -195,16 +217,17 @@ def render_access_report(report: AccountAccessReport) -> None:
         a_status = "[bold green]YES[/bold green]" if a.has_access else "[bold red]NO[/bold red]"
         trx_st = "[green]YES[/green]" if a.can_transfer_trx else "[red]NO[/red]"
         trc20_st = "[green]YES[/green]" if a.can_transfer_trc20 else "[red]NO[/red]"
-        edit_st = "[yellow]YES[/yellow]" if a.can_modify_permissions else "[dim]NO[/dim]"
+        bit_st = "[yellow]enabled[/yellow]" if a.has_account_permission_update_bit else "[dim]disabled[/dim]"
 
         console.print(
             Panel(
                 f"[bold]Порог (Threshold):[/bold] {a.threshold}\n"
                 f"[bold]Доступный вес:[/bold]     {a.available_weight}\n"
                 f"[bold]Доступ к Active:[/bold]   {a_status}\n\n"
-                f"  [bold]TRX transfer:[/bold]     {trx_st}\n"
-                f"  [bold]TRC-20 transfer:[/bold]  {trc20_st}\n"
-                f"  [bold]Permission edit:[/bold]  {edit_st}",
+                f"  [bold]TRX transfer:[/bold]                         {trx_st}\n"
+                f"  [bold]TRC-20 transfer:[/bold]                      {trc20_st}\n"
+                f"  [bold]AccountPermissionUpdateContract bit:[/bold]  {bit_st}\n"
+                f"  [dim]Смена прав аккаунта возможна только через Owner (id=0)[/dim]",
                 title=f"ACTIVE #{a.permission_id} '{a.permission_name}'",
                 border_style="green" if a.has_access else "dim",
             )
@@ -314,6 +337,15 @@ def key_generate_cmd(
     threshold: Optional[int] = typer.Option(
         None, "--threshold", "-t", help="Новый порог threshold (если требуется изменить)"
     ),
+    signing_key_files: Optional[List[Path]] = typer.Option(
+        None, "--key", "-k", help="Keystore текущего Owner (CURRENT permission, не новый ключ)"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Только симуляция добавления ключа в permissions"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Разрешить конфигурацию с риском lockout (опасно)"
+    ),
 ) -> None:
     """Сгенерировать новую пару TRON ключей и безопасно сохранить в keystore."""
     print_network_banner()
@@ -344,6 +376,9 @@ def key_generate_cmd(
             console.print("[bold red]Для --add-permission необходимо указать --account или задать TRON_ACCOUNT в .env[/bold red]")
             raise typer.Exit(code=1)
 
+        console.print(
+            "[dim]AccountPermissionUpdate подписывается CURRENT Owner, не только что сгенерированным ключом.[/dim]\n"
+        )
         p_type = PermissionType.OWNER if target_type.lower() == "owner" else PermissionType.ACTIVE
         _run_permission_update_flow(
             account_address=target_account,
@@ -351,8 +386,10 @@ def key_generate_cmd(
             target_type=p_type,
             key_weight=weight,
             new_threshold=threshold,
-            dry_run=False,
-            generated_private_key=key.private_key,
+            dry_run=dry_run,
+            signing_key_files=signing_key_files,
+            extra_known_addresses=[key.address],
+            force=force,
         )
 
 
@@ -377,7 +414,10 @@ def permission_update_cmd(
         False, "--dry-run", help="Симуляция без отправки транзакции в блокчейн"
     ),
     key_files: Optional[List[Path]] = typer.Option(
-        None, "--key", "-k", help="Файлы keystore подписывающих (можно несколько для мультиподписи)"
+        None, "--key", "-k", help="Файлы keystore CURRENT Owner (можно несколько для мультиподписи)"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Разрешить конфигурацию с риском lockout (опасно)"
     ),
 ) -> None:
     """Безопасное обновление Owner/Active permissions аккаунта с симуляцией (dry-run)."""
@@ -401,6 +441,8 @@ def permission_update_cmd(
         new_threshold=threshold,
         dry_run=dry_run,
         signing_key_files=key_files,
+        extra_known_addresses=None,
+        force=force,
     )
 
 
@@ -411,17 +453,20 @@ def _run_permission_update_flow(
     key_weight: int,
     new_threshold: Optional[int],
     dry_run: bool,
-    generated_private_key: Optional[str] = None,
     signing_key_files: Optional[List[Path]] = None,
+    extra_known_addresses: Optional[List[str]] = None,
+    force: bool = False,
 ) -> None:
     """Общий сценарий проверки, вывода diff, подтверждения и отправки транзакции обновления прав."""
     client = get_tron_client()
     clean_addr = validate_tron_address(account_address)
+    known_addrs = collect_known_signer_addresses(
+        key_files=signing_key_files,
+        extra_addresses=extra_known_addresses,
+    )
 
-    # 1. Загружаем текущие права
     current_perms = inspect_account(clean_addr, client=client).permissions
 
-    # 2. Формируем proposed permissions
     if new_key_address:
         proposed = add_key_to_permissions(
             current=current_perms,
@@ -430,62 +475,65 @@ def _run_permission_update_flow(
             key_weight=key_weight,
             new_threshold=new_threshold,
         )
+    elif target_type == PermissionType.OWNER and new_threshold:
+        new_owner = current_perms.owner.model_copy(update={"threshold": new_threshold})
+        proposed = AccountPermissions(owner=new_owner, witness=current_perms.witness, actives=current_perms.actives)
     else:
-        # Только смена порога
-        if target_type == PermissionType.OWNER and new_threshold:
-            new_owner = current_perms.owner.model_copy(update={"threshold": new_threshold})
-            proposed = AccountPermissions(owner=new_owner, witness=current_perms.witness, actives=current_perms.actives)
-        else:
-            proposed = current_perms
+        proposed = current_perms
 
-    # 3. Симуляция (Dry-run)
-    sim = simulate_permission_update(clean_addr, proposed, client=client)
+    sim = simulate_permission_update(
+        clean_addr,
+        proposed,
+        client=client,
+        known_user_addresses=known_addrs or None,
+    )
 
-    # 4. Отображаем DIFF и предупреждения
     render_diff_report(sim.diff)
-    console.print(f"[bold]Баланс аккаунта:[/bold] {sim.current_balance_trx:.2f} TRX (Комиссия сети: {PERMISSION_UPDATE_FEE_TRX} TRX)")
+    fee_src = "chain parameters" if sim.fee_from_chain else "fallback"
+    console.print(
+        f"[bold]Баланс аккаунта:[/bold] {sim.current_balance_trx:.2f} TRX "
+        f"(Комиссия сети: {sim.required_fee_trx:.2f} TRX, источник: {fee_src})"
+    )
 
     if dry_run:
         console.print("\n[bold yellow]--dry-run режим:[/bold yellow] Симуляция завершена. Транзакция не отправлялась.")
         return
 
-    # 5. Проверка возможности продолжения
+    if not known_addrs:
+        console.print(
+            "\n[bold yellow]ВНИМАНИЕ:[/bold yellow] Не переданы известные ключи (--key / OWNER_PRIVATE_KEY). "
+            "Проверка lockout по известным адресам пропущена."
+        )
+
     if not sim.has_sufficient_fee:
-        console.print(f"\n[bold red]ОШИБКА:[/bold red] Недостаточно TRX для оплаты комиссии ({PERMISSION_UPDATE_FEE_TRX} TRX). Отмена.")
+        console.print(
+            f"\n[bold red]ОШИБКА:[/bold red] Недостаточно TRX для оплаты комиссии "
+            f"({sim.required_fee_trx:.2f} TRX). Отмена."
+        )
         raise typer.Exit(code=1)
 
-    if sim.diff.has_lockout_risk:
-        console.print("\n[bold red]ВНИМАНИЕ: Обнаружен критический риск потери контроля над аккаунтом![/bold red]")
+    if sim.diff.has_lockout_risk and not force:
+        console.print("\n[bold red]ОШИБКА:[/bold red] Обнаружен риск потери управления аккаунтом (lockout).")
+        console.print("[dim]Отправка заблокирована. Повторите с безопасной конфигурацией или явно укажите --force.[/dim]")
+        raise typer.Exit(code=1)
 
-    # 6. Явное подтверждение от пользователя
-    console.print("\n[bold]Для подтверждения отправки транзакции введите '[white]confirm[/white]':[/bold]")
-    user_input = typer.prompt("Подтверждение").strip()
-    if user_input != "confirm":
-        console.print("[yellow]Операция отменена пользователем.[/yellow]")
+    if sim.diff.has_lockout_risk and force:
+        console.print("\n[bold red]--force: lockout-проверка обойдена. Это может навсегда закрыть доступ к аккаунту.[/bold red]")
+
+    if not prompt_broadcast_confirmation():
         return
 
-    # 7. Получение ключей для подписи (для 2-of-2 передайте несколько --key)
-    signing_keys: List[str] = []
-    if generated_private_key:
-        signing_keys.append(generated_private_key)
-    signing_keys.extend(collect_signing_private_keys(signing_key_files))
+    unique_keys = collect_signing_private_keys(signing_key_files)
 
-    unique_keys: List[str] = []
-    seen_addrs: List[str] = []
-    for pk in signing_keys:
-        addr = address_from_private_key(pk)
-        if addr not in seen_addrs:
-            unique_keys.append(pk)
-            seen_addrs.append(addr)
-
-    # 8. Отправка и подтверждение в блокчейне
     with console.status("[bold green]Отправка транзакции и ожидание подтверждения в блоке..."):
         try:
-            txid, receipt, updated_perms = execute_permission_update(
+            txid, _receipt, _updated = execute_permission_update(
                 account_address=clean_addr,
                 proposed_permissions=proposed,
                 signing_private_keys=unique_keys,
                 client=client,
+                known_user_addresses=known_addrs or None,
+                allow_lockout=force,
             )
         except Exception as e:
             console.print(f"\n[bold red]Ошибка при отправке транзакции:[/bold red] {e}")
@@ -493,8 +541,6 @@ def _run_permission_update_flow(
 
     console.print(f"\n[bold green]✓ Права успешно обновлены в блокчейне![/bold green]")
     console.print(f"[bold]TXID:[/bold] [cyan]{txid}[/cyan]\n")
-
-    # 9. Финальный вывод актуального состояния
     console.print("[bold]Новое подтверждённое состояние аккаунта:[/bold]")
     render_account_permissions(inspect_account(clean_addr, client=client))
 
@@ -542,10 +588,7 @@ def _run_transfer_flow(
         console.print("[bold yellow]--dry-run режим:[/bold yellow] Симуляция завершена. Транзакция не отправлялась.")
         return
 
-    console.print("[bold]Для подтверждения отправки транзакции введите '[white]confirm[/white]':[/bold]")
-    user_input = typer.prompt("Подтверждение").strip()
-    if user_input != "confirm":
-        console.print("[yellow]Операция отменена пользователем.[/yellow]")
+    if not prompt_broadcast_confirmation():
         return
 
     try:

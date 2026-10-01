@@ -22,10 +22,9 @@ def get_tron_client(
     """
     net = (network or config.network).strip().lower()
     key = api_key or config.trongrid_api_key
-
     conf = conf_for_name(net)
     if key:
         provider = HTTPProvider(conf, timeout=timeout, api_key=key)
-        return Tron(provider=provider, network=net)
-
-    return Tron(network=net)
+    else:
+        provider = HTTPProvider(conf, timeout=timeout)
+    return Tron(provider=provider, network=net)

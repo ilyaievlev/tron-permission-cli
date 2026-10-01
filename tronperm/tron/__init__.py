@@ -3,11 +3,13 @@
 from tronperm.tron.account import (
     AccountError,
     AccountNotFoundError,
+    FALLBACK_PERMISSION_UPDATE_FEE_TRX,
     PERMISSION_UPDATE_FEE_TRX,
     check_funds_for_permission_update,
     fetch_account_balance,
     fetch_account_balance_sun,
     fetch_account_permissions,
+    fetch_permission_update_fee_trx,
     fetch_trc20_balance,
 )
 from tronperm.tron.client import get_tron_client
@@ -20,6 +22,7 @@ from tronperm.tron.operations import (
     decode_operation_ids,
     decode_operations,
     encode_operations,
+    has_account_permission_update_bit,
 )
 from tronperm.tron.permissions import (
     AccountPermissions,
@@ -48,6 +51,7 @@ __all__ = [
     "can_transfer_trx",
     "can_transfer_trc20",
     "can_modify_permissions",
+    "has_account_permission_update_bit",
     "PermissionType",
     "KeyWeight",
     "Permission",
@@ -55,10 +59,12 @@ __all__ = [
     "AccountError",
     "AccountNotFoundError",
     "PERMISSION_UPDATE_FEE_TRX",
+    "FALLBACK_PERMISSION_UPDATE_FEE_TRX",
     "fetch_account_permissions",
     "fetch_account_balance",
     "fetch_account_balance_sun",
     "fetch_trc20_balance",
+    "fetch_permission_update_fee_trx",
     "check_funds_for_permission_update",
     "TransactionError",
     "BroadcastError",

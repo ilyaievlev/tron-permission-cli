@@ -4,12 +4,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 from tronpy import Tron
 
-from tronperm.config import config
 from tronperm.keys.validate import validate_tron_address
 from tronperm.tron.account import (
-    PERMISSION_UPDATE_FEE_TRX,
     check_funds_for_permission_update,
-    fetch_account_balance,
     fetch_account_permissions,
 )
 from tronperm.tron.client import get_tron_client
@@ -24,6 +21,7 @@ from tronperm.tron.transactions import (
     build_permission_update_transaction,
     sign_transaction,
 )
+from tronperm.services.signing import filter_keys_for_permission, addresses_from_private_keys
 
 
 @dataclass
@@ -64,6 +62,8 @@ class UpdateSimulationResult:
     account_address: str
     current_balance_trx: float
     has_sufficient_fee: bool
+    required_fee_trx: float
+    fee_from_chain: bool
     diff: PermissionsDiffReport
     proposed_permissions: AccountPermissions
     can_proceed: bool
@@ -198,7 +198,7 @@ def simulate_permission_update(
     tron_client = client or get_tron_client()
 
     current_perms = fetch_account_permissions(tron_client, clean_addr)
-    has_fee, balance = check_funds_for_permission_update(tron_client, clean_addr)
+    has_fee, balance, required_fee, fee_from_chain = check_funds_for_permission_update(tron_client, clean_addr)
 
     diff_report = compare_account_permissions(
         account_address=clean_addr,
@@ -208,9 +208,10 @@ def simulate_permission_update(
     )
 
     if not has_fee:
+        source = "chain parameters" if fee_from_chain else "fallback"
         diff_report.warnings.append(
             f"Недостаточно средств на балансе ({balance:.2f} TRX). "
-            f"Для смены прав требуется сжечь минимум {PERMISSION_UPDATE_FEE_TRX} TRX."
+            f"Для смены прав требуется минимум {required_fee:.2f} TRX ({source})."
         )
 
     can_proceed = has_fee and not diff_report.has_lockout_risk
@@ -219,6 +220,8 @@ def simulate_permission_update(
         account_address=clean_addr,
         current_balance_trx=balance,
         has_sufficient_fee=has_fee,
+        required_fee_trx=required_fee,
+        fee_from_chain=fee_from_chain,
         diff=diff_report,
         proposed_permissions=proposed_permissions,
         can_proceed=can_proceed,
@@ -308,8 +311,12 @@ def execute_permission_update(
     signing_private_keys: List[str],
     client: Optional[Tron] = None,
     timeout: float = 30.0,
+    known_user_addresses: Optional[Set[str]] = None,
+    allow_lockout: bool = False,
 ) -> Tuple[str, Dict[str, Any], AccountPermissions]:
     """Безопасно собирает, подписывает, отправляет и верифицирует смену прав аккаунта.
+
+    Подпись выполняется только ключами из CURRENT Owner permission.
 
     Returns:
         (txid, receipt, updated_permissions)
@@ -317,31 +324,67 @@ def execute_permission_update(
     clean_addr = validate_tron_address(account_address)
     tron_client = client or get_tron_client()
 
-    # 1. Проверяем баланс на 100 TRX
-    has_funds, balance = check_funds_for_permission_update(tron_client, clean_addr)
+    has_funds, balance, required_fee, _from_chain = check_funds_for_permission_update(tron_client, clean_addr)
     if not has_funds:
         raise ValueError(
-            f"Недостаточно TRX на балансе для смены прав. Баланс: {balance:.2f} TRX, требуется: {PERMISSION_UPDATE_FEE_TRX} TRX"
+            f"Недостаточно TRX на балансе для смены прав. Баланс: {balance:.2f} TRX, требуется: {required_fee:.2f} TRX"
         )
 
-    # 2. Получаем САМУЮ СВЕЖУЮ конфигурацию аккаунта перед broadcast
     fresh_current = fetch_account_permissions(tron_client, clean_addr)
-
-    # 3. Валидируем proposed конфигурацию
-    diff = compare_account_permissions(clean_addr, fresh_current, proposed_permissions)
+    diff = compare_account_permissions(
+        clean_addr,
+        fresh_current,
+        proposed_permissions,
+        known_user_addresses=known_user_addresses,
+    )
     if not proposed_permissions.owner.is_threshold_reachable:
         raise ValueError("Невозможно отправить транзакцию: сумма весов Owner меньше threshold!")
+    if diff.has_lockout_risk and not allow_lockout:
+        raise ValueError("Отмена: обнаружен риск потери управления аккаунтом (lockout).")
 
-    # 4. Сборка транзакции
+    current_owner_keys = filter_keys_for_permission(signing_private_keys, fresh_current.owner)
+    if not current_owner_keys:
+        raise ValueError(
+            "Ни один из ключей подписи не входит в текущий Owner permission. "
+            "AccountPermissionUpdateContract должен подписываться CURRENT Owner, "
+            "а не ключом, который только добавляется."
+        )
+    signer_addrs = addresses_from_private_keys(current_owner_keys)
+    if not fresh_current.owner.has_access(signer_addrs):
+        raise ValueError(
+            f"Недостаточно подписей CURRENT Owner: вес {fresh_current.owner.calculate_weight(signer_addrs)} "
+            f"< порог {fresh_current.owner.threshold}"
+        )
+
     tx = build_permission_update_transaction(tron_client, clean_addr, proposed_permissions)
-
-    # 5. Подпись транзакции
-    signed_tx = sign_transaction(tx, signing_private_keys)
-
-    # 6. Отправка и ожидание включения в блок
+    signed_tx = sign_transaction(tx, current_owner_keys)
     txid, receipt = broadcast_and_wait(signed_tx, timeout=timeout)
-
-    # 7. Контрольное чтение обновленных прав из блокчейна
     final_perms = fetch_account_permissions(tron_client, clean_addr)
+
+    expected_owner_addrs = {k.address for k in proposed_permissions.owner.keys}
+    actual_owner_addrs = {k.address for k in final_perms.owner.keys}
+    missing = expected_owner_addrs - actual_owner_addrs
+    if missing:
+        raise ValueError(
+            f"Транзакция {txid} подтверждена, но в Owner не найдены ожидаемые адреса: {', '.join(sorted(missing))}"
+        )
+    if final_perms.owner.threshold != proposed_permissions.owner.threshold:
+        raise ValueError(
+            f"Транзакция {txid} подтверждена, но threshold Owner "
+            f"{final_perms.owner.threshold} != предложенному {proposed_permissions.owner.threshold}"
+        )
+
+    for proposed_act in proposed_permissions.actives:
+        actual_act = final_perms.find_active_by_id(proposed_act.id)
+        if actual_act is None:
+            raise ValueError(
+                f"Транзакция {txid} подтверждена, но Active id={proposed_act.id} отсутствует on-chain"
+            )
+        missing_act = {k.address for k in proposed_act.keys} - {k.address for k in actual_act.keys}
+        if missing_act:
+            raise ValueError(
+                f"Транзакция {txid} подтверждена, но в Active id={proposed_act.id} "
+                f"не найдены адреса: {', '.join(sorted(missing_act))}"
+            )
 
     return (txid, receipt, final_perms)

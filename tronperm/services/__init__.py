@@ -5,6 +5,7 @@ from tronperm.services.access import (
     PermissionAccessReport,
     check_account_access,
     resolve_signer_addresses,
+    collect_known_signer_addresses,
 )
 from tronperm.services.inspect import (
     AccountInspectionReport,
@@ -33,6 +34,7 @@ __all__ = [
     "AccountInspectionReport",
     "check_account_access",
     "resolve_signer_addresses",
+    "collect_known_signer_addresses",
     "PermissionAccessReport",
     "AccountAccessReport",
     "add_key_to_permissions",

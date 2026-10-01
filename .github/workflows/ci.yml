@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_shasta:
+        description: Run live Shasta integration tests (read-only, never mainnet)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    env:
+      TRON_NETWORK: shasta
+      RUN_SHASTA_INTEGRATION: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install package and pytest
+        run: pip install -e ".[dev]"
+      - name: Run unit tests
+        run: pytest tests/unit --tb=short
+
+  shasta:
+    name: Shasta integration (read-only)
+    if: github.event_name == 'workflow_dispatch' && inputs.run_shasta
+    runs-on: ubuntu-latest
+    env:
+      TRON_NETWORK: shasta
+      RUN_SHASTA_INTEGRATION: "1"
+      TRON_ACCOUNT: ${{ secrets.TRON_ACCOUNT }}
+      TRONGRID_API_KEY: ${{ secrets.TRONGRID_API_KEY }}
+    steps:
+      - name: Refuse anything except Shasta
+        run: |
+          if [ "$TRON_NETWORK" != "shasta" ]; then
+            echo "Integration tests must never run outside Shasta"
+            exit 1
+          fi
+          if [ -z "$TRON_ACCOUNT" ]; then
+            echo "Set repository secret TRON_ACCOUNT (Shasta address, no private key)"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and pytest
+        run: pip install -e ".[dev]"
+      - name: Run Shasta tests
+        run: pytest tests/integration --tb=short

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Set
 from tronpy import Tron
 
 from tronperm.config import config
@@ -26,6 +26,7 @@ class PermissionAccessReport:
     can_transfer_trx: bool
     can_transfer_trc20: bool
     can_modify_permissions: bool
+    has_account_permission_update_bit: bool
 
 
 @dataclass
@@ -62,6 +63,24 @@ def resolve_signer_addresses(
     return resolved
 
 
+def collect_known_signer_addresses(
+    key_files: Optional[Iterable[Path | str]] = None,
+    extra_addresses: Optional[Iterable[str]] = None,
+    include_env_key: bool = True,
+) -> Set[str]:
+    """Собирает адреса, которыми пользователь реально располагает (без расшифровки, кроме .env)."""
+    from tronperm.keys.generate import address_from_private_key
+
+    known = set(resolve_signer_addresses(key_files=key_files))
+    if include_env_key and config.default_owner_private_key:
+        known.add(address_from_private_key(config.default_owner_private_key))
+    if extra_addresses:
+        for addr in extra_addresses:
+            if addr:
+                known.add(validate_tron_address(addr))
+    return known
+
+
 def _evaluate_permission_access(
     permission: Permission,
     signers: List[str],
@@ -77,10 +96,12 @@ def _evaluate_permission_access(
         trx_ok = permission.can_transfer_trx
         trc20_ok = permission.can_transfer_trc20
         perm_edit_ok = permission.can_modify_permissions
+        update_bit = permission.has_account_permission_update_bit
     else:
         trx_ok = False
         trc20_ok = False
         perm_edit_ok = False
+        update_bit = False
 
     return PermissionAccessReport(
         permission_type=permission.type,
@@ -93,6 +114,7 @@ def _evaluate_permission_access(
         can_transfer_trx=trx_ok,
         can_transfer_trc20=trc20_ok,
         can_modify_permissions=perm_edit_ok,
+        has_account_permission_update_bit=update_bit,
     )
 
 

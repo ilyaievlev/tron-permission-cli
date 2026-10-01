@@ -127,43 +127,42 @@ def encode_operations(operations: Iterable[str | int | TronContractType]) -> str
     return raw.hex()
 
 
+def _enabled_contract_ids(operations: str | Iterable[str | int]) -> Set[int]:
+    """Приводит hex-маску или список операций к множеству ID контрактов."""
+    if isinstance(operations, str):
+        return decode_operation_ids(operations)
+    enabled_ids: Set[int] = set()
+    for item in operations:
+        if isinstance(item, TronContractType):
+            enabled_ids.add(item.value)
+        elif isinstance(item, int):
+            enabled_ids.add(item)
+        elif isinstance(item, str):
+            enabled_ids.add(CONTRACT_NAME_TO_ID.get(item.strip().lower(), -1))
+        else:
+            raise TypeError(f"Недопустимый тип операции: {type(item)}")
+    return enabled_ids
+
+
 def can_transfer_trx(operations: str | Iterable[str | int]) -> bool:
     """Проверяет, разрешен ли перевод нативного TRX (TransferContract)."""
-    if isinstance(operations, str):
-        enabled_ids = decode_operation_ids(operations)
-    else:
-        enabled_ids = {
-            item.value if isinstance(item, TronContractType)
-            else item if isinstance(item, int)
-            else CONTRACT_NAME_TO_ID.get(item.strip().lower(), -1)
-            for item in operations
-        }
-    return TronContractType.TransferContract.value in enabled_ids
+    return TronContractType.TransferContract.value in _enabled_contract_ids(operations)
 
 
 def can_transfer_trc20(operations: str | Iterable[str | int]) -> bool:
     """Проверяет, разрешен ли вызов смарт-контрактов / TRC-20 (TriggerSmartContract)."""
-    if isinstance(operations, str):
-        enabled_ids = decode_operation_ids(operations)
-    else:
-        enabled_ids = {
-            item.value if isinstance(item, TronContractType)
-            else item if isinstance(item, int)
-            else CONTRACT_NAME_TO_ID.get(item.strip().lower(), -1)
-            for item in operations
-        }
-    return TronContractType.TriggerSmartContract.value in enabled_ids
+    return TronContractType.TriggerSmartContract.value in _enabled_contract_ids(operations)
+
+
+def has_account_permission_update_bit(operations: str | Iterable[str | int]) -> bool:
+    """Проверяет наличие бита AccountPermissionUpdateContract в маске Active.
+
+    Это факт битовой маски, а не доказательство, что Active может сменить права.
+    Смена permissions в TRON выполняется Owner permission (id = 0).
+    """
+    return TronContractType.AccountPermissionUpdateContract.value in _enabled_contract_ids(operations)
 
 
 def can_modify_permissions(operations: str | Iterable[str | int]) -> bool:
-    """Проверяет, разрешено ли изменение прав аккаунта (AccountPermissionUpdateContract)."""
-    if isinstance(operations, str):
-        enabled_ids = decode_operation_ids(operations)
-    else:
-        enabled_ids = {
-            item.value if isinstance(item, TronContractType)
-            else item if isinstance(item, int)
-            else CONTRACT_NAME_TO_ID.get(item.strip().lower(), -1)
-            for item in operations
-        }
-    return TronContractType.AccountPermissionUpdateContract.value in enabled_ids
+    """Устаревший алиас: только бит AccountPermissionUpdateContract в operations."""
+    return has_account_permission_update_bit(operations)

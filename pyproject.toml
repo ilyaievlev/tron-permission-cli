@@ -21,6 +21,19 @@ dependencies = [
 [project.scripts]
 tronperm = "tronperm.cli:app"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["tronperm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+markers = [
+    "integration: live TRON network tests (Shasta only, never mainnet)",
+]
