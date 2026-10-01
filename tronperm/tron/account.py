@@ -47,6 +47,16 @@ def fetch_account_permissions(client: Tron, address: str) -> AccountPermissions:
         raise
 
 
+def fetch_account_balance_sun(client: Tron, address: str) -> int:
+    """Возвращает баланс аккаунта в SUN (1 TRX = 1_000_000 SUN)."""
+    clean_addr = validate_tron_address(address)
+    try:
+        account_info = client.get_account(clean_addr)
+        return int(account_info.get("balance", 0) or 0)
+    except AddressNotFound:
+        return 0
+
+
 def fetch_account_balance(client: Tron, address: str) -> float:
     """Возвращает баланс аккаунта в TRX.
 
@@ -54,13 +64,35 @@ def fetch_account_balance(client: Tron, address: str) -> float:
         client: Экземпляр клиента Tron.
         address: TRON Base58Check адрес.
     """
-    clean_addr = validate_tron_address(address)
+    return fetch_account_balance_sun(client, address) / 1_000_000.0
+
+
+def fetch_trc20_balance(
+    client: Tron,
+    owner_address: str,
+    contract_address: str,
+) -> tuple[int, int]:
+    """Возвращает (баланс в минимальных единицах, decimals) токена TRC-20."""
+    from tronperm.tron.tokens import DEFAULT_USDT_DECIMALS
+
+    clean_owner = validate_tron_address(owner_address)
+    clean_contract = validate_tron_address(contract_address)
     try:
-        account_info = client.get_account(clean_addr)
-        balance_sun = account_info.get("balance", 0)
-        return balance_sun / 1_000_000.0
-    except AddressNotFound:
-        return 0.0
+        contract = client.get_contract(clean_contract)
+    except Exception as e:
+        raise AccountError(f"Не удалось загрузить контракт {clean_contract}: {e}") from e
+
+    decimals = DEFAULT_USDT_DECIMALS
+    try:
+        decimals = int(contract.functions.decimals.with_owner(clean_owner)())
+    except Exception:
+        pass
+
+    try:
+        raw_balance = contract.functions.balanceOf.with_owner(clean_owner)(clean_owner)
+        return (int(raw_balance), decimals)
+    except Exception as e:
+        raise AccountError(f"Не удалось прочитать баланс TRC-20 {clean_contract}: {e}") from e
 
 
 def check_funds_for_permission_update(client: Tron, address: str) -> Tuple[bool, float]:

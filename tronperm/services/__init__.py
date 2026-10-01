@@ -1,4 +1,4 @@
-"""Сервисы бизнес-логики: проверка доступа, инспекция и обновление прав."""
+"""Сервисы бизнес-логики: проверка доступа, инспекция, обновление прав и переводы."""
 
 from tronperm.services.access import (
     AccountAccessReport,
@@ -21,6 +21,12 @@ from tronperm.services.permission_update import (
     execute_permission_update,
     simulate_permission_update,
 )
+from tronperm.services.transfer import (
+    TransferPlan,
+    execute_transfer,
+    select_permission_for_transfer,
+    simulate_transfer,
+)
 
 __all__ = [
     "inspect_account",
@@ -38,4 +44,8 @@ __all__ = [
     "SinglePermissionDiff",
     "PermissionsDiffReport",
     "UpdateSimulationResult",
+    "TransferPlan",
+    "simulate_transfer",
+    "execute_transfer",
+    "select_permission_for_transfer",
 ]

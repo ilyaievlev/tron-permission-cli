@@ -1,4 +1,4 @@
-"""Создание, подписание и отправка транзакций AccountPermissionUpdate."""
+"""Создание, подписание и отправка транзакций TRON."""
 
 from typing import Any, Dict, Iterable, Tuple
 from tronpy import Tron
@@ -8,6 +8,7 @@ from tronpy.tron import Transaction
 
 from tronperm.keys.validate import validate_private_key, validate_tron_address
 from tronperm.tron.permissions import AccountPermissions
+from tronperm.tron.tokens import DEFAULT_FEE_LIMIT_SUN
 
 
 class TransactionError(Exception):
@@ -45,6 +46,58 @@ def build_permission_update_transaction(
         return tx_builder.build()
     except Exception as e:
         raise TransactionError(f"Ошибка при сборке транзакции AccountPermissionUpdate: {e}") from e
+
+
+def build_trx_transfer_transaction(
+    client: Tron,
+    from_address: str,
+    to_address: str,
+    amount_sun: int,
+    permission_id: int = 0,
+) -> Transaction:
+    """Формирует транзакцию перевода нативного TRX (TransferContract)."""
+    clean_from = validate_tron_address(from_address)
+    clean_to = validate_tron_address(to_address)
+    if amount_sun <= 0:
+        raise TransactionError("Сумма перевода TRX должна быть больше нуля")
+
+    try:
+        builder = client.trx.transfer(clean_from, clean_to, amount_sun)
+        if permission_id:
+            builder = builder.permission_id(permission_id)
+        return builder.build()
+    except Exception as e:
+        raise TransactionError(f"Ошибка при сборке перевода TRX: {e}") from e
+
+
+def build_trc20_transfer_transaction(
+    client: Tron,
+    from_address: str,
+    to_address: str,
+    contract_address: str,
+    amount_units: int,
+    permission_id: int = 0,
+    fee_limit_sun: int = DEFAULT_FEE_LIMIT_SUN,
+) -> Transaction:
+    """Формирует транзакцию перевода TRC-20 (TriggerSmartContract.transfer)."""
+    clean_from = validate_tron_address(from_address)
+    clean_to = validate_tron_address(to_address)
+    clean_contract = validate_tron_address(contract_address)
+    if amount_units <= 0:
+        raise TransactionError("Сумма перевода токена должна быть больше нуля")
+
+    try:
+        contract = client.get_contract(clean_contract)
+        builder = (
+            contract.functions.transfer(clean_to, amount_units)
+            .with_owner(clean_from)
+            .fee_limit(fee_limit_sun)
+        )
+        if permission_id:
+            builder = builder.permission_id(permission_id)
+        return builder.build()
+    except Exception as e:
+        raise TransactionError(f"Ошибка при сборке перевода TRC-20: {e}") from e
 
 
 def sign_transaction(
@@ -117,9 +170,16 @@ def broadcast_and_wait(
 
     try:
         receipt = ret.wait(timeout=timeout)
-        return (txid, receipt)
     except TransactionNotFound:
         raise ConfirmationTimeoutError(
             f"Транзакция {txid} отправлена в мемпул, но не подтверждена за {timeout} секунд. "
             f"Проверьте статус в эксплорере через некоторое время."
         )
+
+    exec_result = receipt.get("receipt", {}).get("result") if isinstance(receipt, dict) else None
+    if exec_result and str(exec_result).upper() not in ("SUCCESS", "DEFAULT"):
+        raise BroadcastError(
+            f"Транзакция {txid} попала в блок, но исполнение завершилось с ошибкой: {exec_result}"
+        )
+
+    return (txid, receipt)

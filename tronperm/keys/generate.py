@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import secrets
 from tronpy.keys import PrivateKey
 
+from tronperm.keys.validate import validate_private_key
+
 
 @dataclass(frozen=True)
 class GeneratedKey:
@@ -26,3 +28,10 @@ def generate_keypair() -> GeneratedKey:
         public_key=pk.public_key.hex(),
         address=pk.public_key.to_base58check_address(),
     )
+
+
+def address_from_private_key(hex_key: str) -> str:
+    """Вычисляет TRON-адрес из hex-строки приватного ключа."""
+    clean_pk = validate_private_key(hex_key)
+    pk = PrivateKey(bytes.fromhex(clean_pk))
+    return pk.public_key.to_base58check_address()

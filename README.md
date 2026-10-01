@@ -13,6 +13,7 @@ CLI-утилита на Python для безопасного анализа, с�
 - **Безопасная генерация ключей (`key generate`):** локальная криптографически стойкая генерация пар ключей (secp256k1) с шифрованием в Keystore (AES-256-GCM + PBKDF2).
 - **Симуляция и Dry-Run (`permission update --dry-run`):** расчет детального DIFF до отправки транзакции, проверка рисков блокировки аккаунта (lockout) и наличия средств на сетевую комиссию (100 TRX).
 - **Безопасное обновление (`permission update`):** получение свежего состояния блокчейна, расчет новой конфигурации, явное текстовое подтверждение (`confirm`), подпись и верификация результата в сети.
+- **Переводы TRX и USDT (`transfer trx` / `transfer usdt`):** мультиподпись одной транзакции несколькими `--key`, выбор Owner/Active `permission_id`, dry-run и проверка threshold.
 
 ---
 
@@ -268,6 +269,74 @@ tronperm permission update --add-address TNewSignerAddress... --threshold 2
 4. Запрашивается ключ текущего владельца для подписи (hex либо расшифровка указанного `--key keys/owner.json`).
 5. Транзакция собирается, подписывается и отправляется в сеть.
 6. Утилита дожидается включения транзакции в блок и повторно запрашивает обновлённое состояние для контроля.
+
+Для схемы 2-of-2 передайте оба keystore:
+
+```bash
+tronperm permission update --add-address TCCC... --threshold 2 \
+  --key keys/owner-shasta.json \
+  --key keys/signer-2.json
+```
+
+---
+
+### 5. Перевод TRX и USDT с мультиподписью (`transfer`)
+
+Деньги всегда уходят **с аккаунта** (например `TVsHK...`), а не с адреса второго ключа. Ключи только подписывают транзакцию.
+
+Перед отправкой CLI:
+- читает актуальные permissions;
+- выбирает Owner (`permission_id = 0`) или Active (`id >= 2`);
+- проверяет, что сумма весов подписей ≥ `threshold`;
+- для Active дополнительно проверяет битовую маску операций (`TransferContract` для TRX, `TriggerSmartContract` для USDT);
+- показывает план и требует `confirm`.
+
+#### Симуляция перевода TRX
+
+```bash
+tronperm transfer trx TRecipientAddress... --amount 1.5 \
+  --from TVsHKrCVHWNa6pY5h8dVVSxL2S9KnxrhXx \
+  --key keys/owner-shasta.json \
+  --key keys/signer-2.json \
+  --dry-run
+```
+
+#### Реальный перевод TRX (2-of-2 Owner)
+
+```bash
+tronperm transfer trx TRecipientAddress... --amount 1.5 \
+  --from TVsHKrCVHWNa6pY5h8dVVSxL2S9KnxrhXx \
+  --key keys/owner-shasta.json \
+  --key keys/signer-2.json \
+  --permission-id 0
+```
+
+После `confirm` утилита отдельно спросит пароль каждого keystore, подпишет одной транзакцией оба ключа и отправит её в сеть.
+
+#### Перевод USDT (TRC-20)
+
+```bash
+tronperm transfer usdt TRecipientAddress... --amount 10 \
+  --from TVsHKrCVHWNa6pY5h8dVVSxL2S9KnxrhXx \
+  --key keys/owner-shasta.json \
+  --key keys/signer-2.json
+```
+
+Контракт USDT выбирается по сети:
+
+| Сеть | Контракт USDT |
+|---|---|
+| mainnet | `TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t` |
+| shasta | `TG3XXyExBkPp9nzdajDZsozEu4BkaSJozs` |
+| nile | `TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf` |
+
+Его можно переопределить `--contract` или `USDT_CONTRACT` в `.env`.
+
+#### Как CLI выбирает permission
+
+- Если указан `--permission-id`, используется он (0 = Owner, 2+ = Active).
+- Если не указан, берётся permission, которое **разрешает операцию** и **набирает threshold** переданными ключами. Предпочтение у того, куда входят все указанные ключи.
+- Важно: если второй ключ добавлен **только в Owner**, Active может по-прежнему быть 1-of-1. Тогда перевод одним ключом через Active всё ещё возможен. Для принудительного 2-of-2 укажите `--permission-id 0` или ужесточите Active.
 
 ---
 

@@ -6,7 +6,9 @@ from tronperm.tron.account import (
     PERMISSION_UPDATE_FEE_TRX,
     check_funds_for_permission_update,
     fetch_account_balance,
+    fetch_account_balance_sun,
     fetch_account_permissions,
+    fetch_trc20_balance,
 )
 from tronperm.tron.client import get_tron_client
 from tronperm.tron.operations import (
@@ -30,6 +32,8 @@ from tronperm.tron.transactions import (
     ConfirmationTimeoutError,
     TransactionError,
     build_permission_update_transaction,
+    build_trc20_transfer_transaction,
+    build_trx_transfer_transaction,
     broadcast_and_wait,
     sign_transaction,
 )
@@ -53,11 +57,15 @@ __all__ = [
     "PERMISSION_UPDATE_FEE_TRX",
     "fetch_account_permissions",
     "fetch_account_balance",
+    "fetch_account_balance_sun",
+    "fetch_trc20_balance",
     "check_funds_for_permission_update",
     "TransactionError",
     "BroadcastError",
     "ConfirmationTimeoutError",
     "build_permission_update_transaction",
+    "build_trx_transfer_transaction",
+    "build_trc20_transfer_transaction",
     "sign_transaction",
     "broadcast_and_wait",
 ]

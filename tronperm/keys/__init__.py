@@ -1,6 +1,6 @@
 """Модуль работы с ключами: генерация, валидация и шифрованное хранение."""
 
-from tronperm.keys.generate import GeneratedKey, generate_keypair
+from tronperm.keys.generate import GeneratedKey, generate_keypair, address_from_private_key
 from tronperm.keys.storage import (
     InvalidPasswordError,
     KeystoreError,
@@ -18,6 +18,7 @@ from tronperm.keys.validate import (
 __all__ = [
     "GeneratedKey",
     "generate_keypair",
+    "address_from_private_key",
     "is_valid_tron_address",
     "validate_tron_address",
     "is_valid_private_key",

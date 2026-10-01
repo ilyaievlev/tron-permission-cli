@@ -10,9 +10,10 @@ from rich.text import Text
 
 from tronperm.config import config
 from tronperm.keys import (
+    address_from_private_key,
     generate_keypair,
-    is_valid_tron_address,
     load_private_key,
+    read_keystore_address,
     save_keystore,
     validate_private_key,
     validate_tron_address,
@@ -21,24 +22,29 @@ from tronperm.services import (
     AccountAccessReport,
     AccountInspectionReport,
     PermissionsDiffReport,
-    UpdateSimulationResult,
+    TransferPlan,
     add_key_to_permissions,
     check_account_access,
-    compare_account_permissions,
     execute_permission_update,
+    execute_transfer,
     inspect_account,
+    resolve_signer_addresses,
     simulate_permission_update,
+    simulate_transfer,
 )
 from tronperm.tron.account import PERMISSION_UPDATE_FEE_TRX
 from tronperm.tron.client import get_tron_client
 from tronperm.tron.permissions import AccountPermissions, PermissionType
+from tronperm.tron.tokens import DEFAULT_FEE_LIMIT_SUN
 
 app = typer.Typer(help="tronperm — CLI для анализа и управления TRON Account Permissions", no_args_is_help=True)
 key_app = typer.Typer(help="Генерация и локальное хранилище ключей", no_args_is_help=True)
 perm_app = typer.Typer(help="Управление и симуляция permissions", no_args_is_help=True)
+transfer_app = typer.Typer(help="Переводы TRX и USDT с мультиподписью", no_args_is_help=True)
 
 app.add_typer(key_app, name="key")
 app.add_typer(perm_app, name="permission")
+app.add_typer(transfer_app, name="transfer")
 
 console = Console()
 
@@ -55,6 +61,71 @@ def print_network_banner() -> None:
         )
     else:
         console.print(f"[bold cyan]Сеть:[/bold cyan] {net} TESTNET")
+
+
+def collect_signing_private_keys(key_files: Optional[List[Path]]) -> List[str]:
+    """Собирает приватные ключи из .env и зашифрованных keystore-файлов."""
+    signing_keys: List[str] = []
+    seen_addresses: List[str] = []
+
+    def _append(pk: str) -> None:
+        addr = address_from_private_key(pk)
+        if addr not in seen_addresses:
+            signing_keys.append(pk)
+            seen_addresses.append(addr)
+
+    if config.default_owner_private_key:
+        _append(validate_private_key(config.default_owner_private_key))
+        console.print("[dim]Добавлен ключ из OWNER_PRIVATE_KEY[/dim]")
+
+    if key_files:
+        for kf in key_files:
+            file_addr = read_keystore_address(kf)
+            password = typer.prompt(f"Пароль для {kf.name} ({file_addr})", hide_input=True)
+            pk = load_private_key(kf, password)
+            derived = address_from_private_key(pk)
+            if derived != file_addr:
+                raise ValueError(f"Адрес в {kf} не совпадает с ключом после расшифровки")
+            _append(pk)
+
+    if not signing_keys:
+        console.print("[dim]Введите hex приватного ключа (или укажите --key):[/dim]")
+        raw_pk = typer.prompt("Private Key", hide_input=True)
+        _append(validate_private_key(raw_pk))
+
+    return signing_keys
+
+
+def render_transfer_plan(plan: TransferPlan) -> None:
+    """Показывает план перевода до подтверждения."""
+    perm = plan.permission
+    table = Table(title="План перевода", header_style="bold")
+    table.add_column("Поле")
+    table.add_column("Значение")
+    table.add_row("Актив", plan.symbol)
+    table.add_row("Откуда", plan.from_address)
+    table.add_row("Куда", plan.to_address)
+    table.add_row("Сумма", plan.amount_display)
+    table.add_row("Баланс отправителя", plan.sender_balance_display)
+    table.add_row(
+        "Permission",
+        f"{perm.type.value} #{perm.id} '{perm.permission_name}'",
+    )
+    table.add_row("Порог / доступный вес", f"{perm.threshold} / {plan.available_weight}")
+    if plan.contract_address:
+        table.add_row("Контракт TRC-20", plan.contract_address)
+        table.add_row("fee_limit", f"{plan.fee_limit_sun / 1_000_000:.2f} TRX")
+    console.print(table)
+    console.print("[bold]Подписывающие адреса:[/bold]")
+    for addr in plan.signer_addresses:
+        in_perm = perm.get_key(addr) is not None
+        mark = "[green]в permission[/green]" if in_perm else "[red]не в permission[/red]"
+        console.print(f"  • [cyan]{addr}[/cyan] ({mark})")
+    if plan.warnings:
+        console.print()
+        for warning in plan.warnings:
+            console.print(f"  [bold yellow]⚠[/bold yellow] {warning}")
+    console.print()
 
 
 def render_account_permissions(report: AccountInspectionReport) -> None:
@@ -305,8 +376,8 @@ def permission_update_cmd(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Симуляция без отправки транзакции в блокчейн"
     ),
-    key_file: Optional[Path] = typer.Option(
-        None, "--key", "-k", help="Файл keystore подписывающего текущего владельца"
+    key_files: Optional[List[Path]] = typer.Option(
+        None, "--key", "-k", help="Файлы keystore подписывающих (можно несколько для мультиподписи)"
     ),
 ) -> None:
     """Безопасное обновление Owner/Active permissions аккаунта с симуляцией (dry-run)."""
@@ -329,7 +400,7 @@ def permission_update_cmd(
         key_weight=weight,
         new_threshold=threshold,
         dry_run=dry_run,
-        signing_key_file=key_file,
+        signing_key_files=key_files,
     )
 
 
@@ -341,7 +412,7 @@ def _run_permission_update_flow(
     new_threshold: Optional[int],
     dry_run: bool,
     generated_private_key: Optional[str] = None,
-    signing_key_file: Optional[Path] = None,
+    signing_key_files: Optional[List[Path]] = None,
 ) -> None:
     """Общий сценарий проверки, вывода diff, подтверждения и отправки транзакции обновления прав."""
     client = get_tron_client()
@@ -393,18 +464,19 @@ def _run_permission_update_flow(
         console.print("[yellow]Операция отменена пользователем.[/yellow]")
         return
 
-    # 7. Получение ключа для подписи
+    # 7. Получение ключей для подписи (для 2-of-2 передайте несколько --key)
     signing_keys: List[str] = []
-    if config.default_owner_private_key:
-        signing_keys.append(config.default_owner_private_key)
-    elif signing_key_file:
-        pwd = typer.prompt("Введите пароль для расшифровки ключа подписи", hide_input=True)
-        pk = load_private_key(signing_key_file, pwd)
-        signing_keys.append(pk)
-    else:
-        console.print("[dim]Введите hex приватного ключа текущего Owner (или укажите --key):[/dim]")
-        raw_pk = typer.prompt("Owner Private Key", hide_input=True)
-        signing_keys.append(validate_private_key(raw_pk))
+    if generated_private_key:
+        signing_keys.append(generated_private_key)
+    signing_keys.extend(collect_signing_private_keys(signing_key_files))
+
+    unique_keys: List[str] = []
+    seen_addrs: List[str] = []
+    for pk in signing_keys:
+        addr = address_from_private_key(pk)
+        if addr not in seen_addrs:
+            unique_keys.append(pk)
+            seen_addrs.append(addr)
 
     # 8. Отправка и подтверждение в блокчейне
     with console.status("[bold green]Отправка транзакции и ожидание подтверждения в блоке..."):
@@ -412,7 +484,7 @@ def _run_permission_update_flow(
             txid, receipt, updated_perms = execute_permission_update(
                 account_address=clean_addr,
                 proposed_permissions=proposed,
-                signing_private_keys=signing_keys,
+                signing_private_keys=unique_keys,
                 client=client,
             )
         except Exception as e:
@@ -425,3 +497,130 @@ def _run_permission_update_flow(
     # 9. Финальный вывод актуального состояния
     console.print("[bold]Новое подтверждённое состояние аккаунта:[/bold]")
     render_account_permissions(inspect_account(clean_addr, client=client))
+
+
+def _run_transfer_flow(
+    asset: str,
+    to_address: str,
+    amount: str,
+    from_address: Optional[str],
+    key_files: Optional[List[Path]],
+    permission_id: Optional[int],
+    dry_run: bool,
+    contract: Optional[str] = None,
+    fee_limit_sun: int = DEFAULT_FEE_LIMIT_SUN,
+) -> None:
+    """Общий сценарий перевода TRX или USDT с мультиподписью."""
+    if not key_files and not config.default_owner_private_key:
+        console.print("[bold red]Укажите хотя бы один --key файл keystore для подписи[/bold red]")
+        raise typer.Exit(code=1)
+
+    signer_addresses = resolve_signer_addresses(key_files=key_files)
+    if config.default_owner_private_key:
+        env_addr = address_from_private_key(config.default_owner_private_key)
+        if env_addr not in signer_addresses:
+            signer_addresses.append(env_addr)
+
+    try:
+        plan = simulate_transfer(
+            from_address=from_address,
+            to_address=to_address,
+            amount=amount,
+            asset=asset,
+            signer_addresses=signer_addresses,
+            permission_id=permission_id,
+            contract_address=contract,
+            fee_limit_sun=fee_limit_sun,
+        )
+    except Exception as e:
+        console.print(f"[bold red]Ошибка:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    render_transfer_plan(plan)
+
+    if dry_run:
+        console.print("[bold yellow]--dry-run режим:[/bold yellow] Симуляция завершена. Транзакция не отправлялась.")
+        return
+
+    console.print("[bold]Для подтверждения отправки транзакции введите '[white]confirm[/white]':[/bold]")
+    user_input = typer.prompt("Подтверждение").strip()
+    if user_input != "confirm":
+        console.print("[yellow]Операция отменена пользователем.[/yellow]")
+        return
+
+    try:
+        signing_keys = collect_signing_private_keys(key_files)
+        with console.status("[bold green]Подпись, отправка и ожидание подтверждения..."):
+            txid, _receipt = execute_transfer(plan, signing_keys)
+    except Exception as e:
+        console.print(f"\n[bold red]Ошибка при отправке перевода:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    console.print(f"\n[bold green]✓ Перевод {plan.amount_display} отправлен[/bold green]")
+    console.print(f"[bold]TXID:[/bold] [cyan]{txid}[/cyan]")
+
+
+@transfer_app.command("trx")
+def transfer_trx_cmd(
+    to_address: str = typer.Argument(..., help="Адрес получателя TRX"),
+    amount: str = typer.Option(..., "--amount", "-n", help="Сумма в TRX, например 1.5"),
+    from_address: Optional[str] = typer.Option(
+        None, "--from", "-f", help="Аккаунт-отправитель (по умолчанию TRON_ACCOUNT)"
+    ),
+    key_files: Optional[List[Path]] = typer.Option(
+        None, "--key", "-k", help="Keystore-файлы подписывающих (для 2-of-2 укажите оба)"
+    ),
+    permission_id: Optional[int] = typer.Option(
+        None, "--permission-id", "-p", help="0 = Owner, 2+ = Active. Если не задан — выбирается автоматически"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Только симуляция, без broadcast"),
+) -> None:
+    """Отправить TRX с мультиподписью Owner/Active permission."""
+    print_network_banner()
+    _run_transfer_flow(
+        asset="trx",
+        to_address=to_address,
+        amount=amount,
+        from_address=from_address,
+        key_files=key_files,
+        permission_id=permission_id,
+        dry_run=dry_run,
+    )
+
+
+@transfer_app.command("usdt")
+def transfer_usdt_cmd(
+    to_address: str = typer.Argument(..., help="Адрес получателя USDT"),
+    amount: str = typer.Option(..., "--amount", "-n", help="Сумма в USDT, например 10.5"),
+    from_address: Optional[str] = typer.Option(
+        None, "--from", "-f", help="Аккаунт-отправитель (по умолчанию TRON_ACCOUNT)"
+    ),
+    key_files: Optional[List[Path]] = typer.Option(
+        None, "--key", "-k", help="Keystore-файлы подписывающих (для 2-of-2 укажите оба)"
+    ),
+    permission_id: Optional[int] = typer.Option(
+        None, "--permission-id", "-p", help="0 = Owner, 2+ = Active. Если не задан — выбирается автоматически"
+    ),
+    contract: Optional[str] = typer.Option(
+        None, "--contract", help="Адрес TRC-20 контракта (по умолчанию USDT текущей сети)"
+    ),
+    fee_limit: float = typer.Option(
+        DEFAULT_FEE_LIMIT_SUN / 1_000_000,
+        "--fee-limit",
+        help="Максимальная комиссия за смарт-контракт в TRX",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Только симуляция, без broadcast"),
+) -> None:
+    """Отправить USDT (TRC-20) с мультиподписью Owner/Active permission."""
+    print_network_banner()
+    _run_transfer_flow(
+        asset="usdt",
+        to_address=to_address,
+        amount=amount,
+        from_address=from_address,
+        key_files=key_files,
+        permission_id=permission_id,
+        dry_run=dry_run,
+        contract=contract,
+        fee_limit_sun=int(fee_limit * 1_000_000),
+    )

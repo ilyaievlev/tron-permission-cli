@@ -59,6 +59,12 @@ class Config:
         return pk if pk else None
 
     @property
+    def usdt_contract(self) -> Optional[str]:
+        """Переопределение адреса контракта USDT (TRC-20)."""
+        addr = os.getenv("USDT_CONTRACT", "").strip()
+        return addr if addr else None
+
+    @property
     def keys_dir(self) -> Path:
         """Директория хранения зашифрованных ключей."""
         return Path("keys")
