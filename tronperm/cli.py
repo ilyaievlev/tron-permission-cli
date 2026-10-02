@@ -393,6 +393,49 @@ def key_generate_cmd(
         )
 
 
+def _keystore_path(name: Optional[str], address: str) -> Path:
+    file_name = name or f"key_{address[:8]}"
+    if not file_name.endswith(".json"):
+        file_name += ".json"
+    return config.keys_dir / file_name
+
+
+@key_app.command("import")
+def key_import_cmd(
+    name: Optional[str] = typer.Option(
+        None, "--name", "-n", help="Имя ключа (файл keys/<name>.json)"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Перезаписать существующий файл keystore"
+    ),
+) -> None:
+    """Импортировать существующий hex-ключ в зашифрованный keystore."""
+    console.print("[dim]Введите hex приватного ключа (64 символа). Ввод скрыт, ключ в файл не пишется открытым текстом.[/dim]")
+    raw_pk = typer.prompt("Private Key", hide_input=True)
+    try:
+        clean_pk = validate_private_key(raw_pk)
+        address = address_from_private_key(clean_pk)
+    except ValueError as e:
+        console.print(f"[bold red]Ошибка:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    file_path = _keystore_path(name, address)
+    if file_path.exists() and not force:
+        console.print(
+            f"[bold red]Файл уже существует:[/bold red] {file_path}\n"
+            "Укажите другое --name или повторите с --force."
+        )
+        raise typer.Exit(code=1)
+
+    console.print("[dim]Введите пароль для шифрования файла ключа (AES-256-GCM):[/dim]")
+    password = typer.prompt("Пароль", hide_input=True, confirmation_prompt=True)
+
+    save_keystore(file_path, clean_pk, address, password)
+    console.print(f"\n[bold green]✓[/bold green] Ключ импортирован в: [cyan]{file_path}[/cyan]")
+    console.print(f"[bold]TRON Address:[/bold] [yellow]{address}[/yellow]")
+    console.print("[dim]Сверьте адрес с кошельком. Приватный ключ в файле зашифрован.[/dim]")
+
+
 @perm_app.command("update")
 def permission_update_cmd(
     account: Optional[str] = typer.Argument(
