@@ -10,6 +10,8 @@ from rich.text import Text
 
 from tronperm.config import config
 from tronperm.keys import (
+    InvalidPasswordError,
+    KeystoreError,
     address_from_private_key,
     generate_keypair,
     load_private_key,
@@ -434,6 +436,56 @@ def key_import_cmd(
     console.print(f"\n[bold green]✓[/bold green] Ключ импортирован в: [cyan]{file_path}[/cyan]")
     console.print(f"[bold]TRON Address:[/bold] [yellow]{address}[/yellow]")
     console.print("[dim]Сверьте адрес с кошельком. Приватный ключ в файле зашифрован.[/dim]")
+
+
+def _resolve_keystore_file(key_file: Optional[Path], name: Optional[str]) -> Path:
+    if key_file and name:
+        raise ValueError("Укажите либо путь к файлу, либо --name, не оба сразу")
+    if key_file:
+        return key_file
+    if name:
+        file_name = name if name.endswith(".json") else f"{name}.json"
+        return config.keys_dir / file_name
+    raise ValueError("Укажите путь к keystore или --name")
+
+
+@key_app.command("export")
+def key_export_cmd(
+    key_file: Optional[Path] = typer.Argument(
+        None, help="Путь к JSON-файлу keystore"
+    ),
+    name: Optional[str] = typer.Option(
+        None, "--name", "-n", help="Имя ключа (файл keys/<name>.json)"
+    ),
+) -> None:
+    """Расшифровать keystore и показать hex приватного ключа в терминале."""
+    try:
+        file_path = _resolve_keystore_file(key_file, name)
+        address = read_keystore_address(file_path)
+    except (ValueError, FileNotFoundError, KeystoreError) as e:
+        console.print(f"[bold red]Ошибка:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    console.print(f"[bold]Файл:[/bold]    [cyan]{file_path}[/cyan]")
+    console.print(f"[bold]Адрес:[/bold]   [yellow]{address}[/yellow]")
+    console.print(
+        "\n[bold yellow]ВНИМАНИЕ:[/bold yellow] экспорт покажет приватный ключ в терминале. "
+        "Не копируйте его в чат, скриншоты и незашифрованные файлы."
+    )
+    confirm = typer.prompt("Для продолжения введите EXPORT")
+    if confirm != "EXPORT":
+        console.print("[bold red]Экспорт отменён.[/bold red]")
+        raise typer.Exit(code=1)
+
+    password = typer.prompt(f"Пароль для {file_path.name}", hide_input=True)
+    try:
+        private_key = load_private_key(file_path, password)
+    except InvalidPasswordError as e:
+        console.print(f"[bold red]Ошибка:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    console.print(f"\n[bold]TRON Address:[/bold]  [yellow]{address}[/yellow]")
+    console.print(f"[bold]Private Key:[/bold]   {private_key}")
 
 
 @perm_app.command("update")
